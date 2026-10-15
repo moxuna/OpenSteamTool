@@ -25,6 +25,16 @@ if(NOT WIN32)
     return()
 endif()
 
+# The sources are UTF-8 and several carry non-ASCII characters (box-drawing and
+# dashes in comments). Without /utf-8 MSVC decodes them with the machine's ANSI
+# code page, which emits C4819 for nearly every file and -- on CJK code pages --
+# can make a multi-byte sequence consume the character after it, producing bogus
+# syntax errors such as "C2059: syntax error: '}'" in files that compile
+# perfectly on an en-US host. Observed on a zh-CN machine with code page 936.
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/OpenSteamToolBuildInfo.h.in"
