@@ -6,6 +6,7 @@
 #include "Utils/Tickets/AppTicket.h"
 #include "Utils/Support/FnvHash.h"
 #include "Utils/CloudRedirect/CloudRedirectHost.h"
+#include "OSTPlatform/include/Memory.h"
 #include <chrono>
 #include <cstring>
 #include <deque>
@@ -79,6 +80,36 @@ namespace {
         pBody  = data + off;
         cbBody = size - off;
         return true;
+    }
+
+    // ── CNetPacket layout ──────────────────────────────────────
+    // Older Steam builds: m_pubData is at +0x08, right after m_hConnection.
+    // Build 1791918634 (and anything newer) inserts 8 more bytes before the same
+    // fields, so m_pubData/m_cubData/m_cRef/m_pubNetworkBuffer/m_pNext all sit
+    // at +8.  Everything below is written against the old struct, so RecvPkt
+    // converts Steam's raw pointer into a "field view" first and hands the raw
+    // pointer straight back to Steam.
+    //
+    // The two layouts are told apart by the qword at +0x08: in the old layout it
+    // is m_pubData and therefore points at readable memory, while in the new one
+    // it is part of the extra header and holds junk (observed 0x00000000ffffffff
+    // and similar).  A wrong guess is not fatal either way -- RecvPkt re-checks
+    // that the resulting m_pubData is readable before touching the packet, and
+    // passes anything it cannot vouch for through untouched.
+    //
+    // Deliberately a pure function: the bias is a property of the loaded
+    // steamclient64.dll, so deriving it per packet keeps RecvPkt free of the
+    // shared mutable state it would otherwise race on across Steam's network
+    // threads.
+    constexpr uintptr_t kNewPacketBias = 8;
+
+    inline CNetPacket* PacketFields(CNetPacket* raw)
+    {
+        const auto* qwords = reinterpret_cast<const uintptr_t*>(raw);
+        const bool oldLayout =
+            OSTPlatform::Memory::IsReadable(reinterpret_cast<const void*>(qwords[1]), 1);
+        return reinterpret_cast<CNetPacket*>(
+            reinterpret_cast<uint8*>(raw) + (oldLayout ? 0 : kNewPacketBias));
     }
 
     // ── Incoming: replace header and/or body (ring-buffer pool) ──
@@ -865,7 +896,11 @@ namespace Hooks_NetPacket_RichPresence {
 
     // Deliver the pending manufactured PersonaState by borrowing the
     // carrier's data pointer for one oRecvPkt call, then restore.
-    void TryInject(void* pThis, CNetPacket* pCarrier,
+    //
+    // pCarrier is the field view while pRawCarrier is Steam's own pointer: the
+    // two alias the same m_pubData/m_cubData, so mutating the view is enough,
+    // but the original must be invoked with the pointer Steam handed us.
+    void TryInject(void* pThis, CNetPacket* pCarrier, CNetPacket* pRawCarrier,
                    bool (*invokeOriginal)(void*, CNetPacket*))
     {
         if (!g_InjectPending || g_cbInjectPkt == 0) return;
@@ -875,7 +910,7 @@ namespace Hooks_NetPacket_RichPresence {
         uint32 origSize = pCarrier->m_cubData;
         pCarrier->m_pubData = g_InjectPkt;
         pCarrier->m_cubData = g_cbInjectPkt;
-        invokeOriginal(pThis, pCarrier);
+        invokeOriginal(pThis, pRawCarrier);
         pCarrier->m_pubData = origData;
         pCarrier->m_cubData = origSize;
         LOG_RICHPRESENCE_INFO("Delivered manufactured self-PersonaState ({} bytes)", g_cbInjectPkt);
@@ -1092,7 +1127,10 @@ namespace Hooks_NetPacket_Cloud {
     // Deliver any queued cloud responses by borrowing the carrier packet for
     // one oRecvPkt call each (same trick as RichPresence::TryInject). Runs on
     // the network thread from inside the RecvPkt hook.
-    void Drain(void* pThis, CNetPacket* pCarrier,
+    //
+    // pCarrier is the field view, pRawCarrier Steam's own pointer -- see
+    // TryInject for why the original needs the latter.
+    void Drain(void* pThis, CNetPacket* pCarrier, CNetPacket* pRawCarrier,
                bool (*invokeOriginal)(void*, CNetPacket*))
     {
         for (;;) {
@@ -1108,7 +1146,7 @@ namespace Hooks_NetPacket_Cloud {
             uint32 origSize = pCarrier->m_cubData;
             pCarrier->m_pubData = pkt.data();
             pCarrier->m_cubData = static_cast<uint32>(pkt.size());
-            invokeOriginal(pThis, pCarrier);
+            invokeOriginal(pThis, pRawCarrier);
             pCarrier->m_pubData = origData;
             pCarrier->m_cubData = origSize;
             LOG_NETPACKET_DEBUG("Cloud: delivered {}-byte response", pkt.size());
@@ -1316,14 +1354,25 @@ namespace {
         return result;
     }
 
-    HOOK_FUNC(RecvPkt, void*, void* pThis, CNetPacket* pPacket)
+    HOOK_FUNC(RecvPkt, void*, void* pThis, CNetPacket* pRawPacket)
     {
+        // pPacket is the field view; Steam must always be given pRawPacket.
+        CNetPacket* pPacket = PacketFields(pRawPacket);
+
+        // Unknown layout / empty packet: hand it to Steam untouched rather
+        // than dereference a pointer we cannot trust.
+        if (!OSTPlatform::Memory::IsReadable(pPacket->m_pubData, sizeof(MsgHdr)))
+            return oRecvPkt(pThis, pRawPacket);
+
+        // Both carriers get the raw pointer as well as the field view, so the
+        // original is always called with the pointer Steam handed us. Both
+        // lambdas stay capture-free.
         Hooks_NetPacket_RichPresence::TryInject(
-            pThis, pPacket,
+            pThis, pPacket, pRawPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
 
         Hooks_NetPacket_Cloud::Drain(
-            pThis, pPacket,
+            pThis, pPacket, pRawPacket,
             [](void* pT, CNetPacket* pP) -> bool { return oRecvPkt(pT, pP) != nullptr; });
 
         EMsg eMsg;
@@ -1350,7 +1399,7 @@ namespace {
             }
         }
 
-        return oRecvPkt(pThis, pPacket);
+        return oRecvPkt(pThis, pRawPacket);
     }
 
 } // anonymous namespace

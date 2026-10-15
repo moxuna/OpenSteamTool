@@ -195,20 +195,33 @@ The C++ runtime provides two Lua helpers:
 
 ### Steam version compatibility
 
-OpenSteamTool no longer ships byte-pattern signatures inside the DLL. Instead, on each launch it computes the SHA-256 of `steamclient64.dll` and `steamui.dll` on disk and looks up a matching pattern file from the upstream tracker at [`OpenSteam001/steam-monitor`](https://github.com/OpenSteam001/steam-monitor) (`pattern` branch).
+OpenSteamTool resolves byte-patterns and IPC method tables by computing the SHA-256 of `steamclient64.dll` / `steamui.dll` on disk and looking for a table with that name. There are four sources, tried in order:
 
 Lookup order (every launch):
 
-1. **GitHub raw** — `https://raw.githubusercontent.com/OpenSteam001/steam-monitor/pattern/...`. Canonical source.
+1. **GitHub raw** — `https://raw.githubusercontent.com/OpenSteam001/steam-monitor/{pattern,ipc}/...`. Canonical source.
 2. **jsDelivr CDN** — automatic fallback if GitHub raw is unreachable (connection refused / timeout / 5xx). No configuration required. Useful in regions where `raw.githubusercontent.com` is blocked but jsDelivr is reachable (e.g. mainland China).
-3. **Local cache** — `<Steam>\opensteamtool\pattern\<subdir>\<sha256>.toml`. Used **only** when remote is unreachable. The cache is overwritten after every successful remote fetch.
+3. **Local cache** — `<Steam>\opensteamtool\<channel>\<component>\<sha256>.toml`. The cache is overwritten after every successful remote fetch.
+4. **Built-in table** — a table compiled into `OpenSteamTool.dll` at build time, taken from [`metadata/`](metadata/) in this repository.
 
-Remote is consulted on every launch so users automatically pick up upstream re-publications (e.g. the bot adding a new signature, or fixing an existing one) without having to clear any cache.
+Tiers 1–2 are consulted on every launch so users automatically pick up upstream re-publications (e.g. the bot adding a new signature, or fixing an existing one) without having to clear any cache. Tier 4 exists because those re-publications only happen *after* the bot notices a new Steam build: in the window between a Steam update and the tracker catching up, every hook that depends on a table used to be disabled for everyone.
 
-If a step returns **HTTP 404** the mirror loop stops immediately — all mirrors serve the same content, so a 404 means the upstream bot has not yet published a TOML for this Steam build. The code then falls back to the local cache if one exists; otherwise a one-shot popup appears with the unmatched DLL name, its SHA-256, the expected cache path, and the upstream URL. Only the hooks tied to that DLL are disabled — the rest of OpenSteamTool keeps working.
+Because the built-in table is keyed by the same SHA-256 as the cache, it applies to exactly the Steam build the release was made for and goes inert by itself once Steam ships a new client — at which point tiers 1–3 take over again, or you update OpenSteamTool.
 
-You can also drop a pattern TOML into the cache directory manually if you know the layout for a given build; the file name must be `<sha256>.toml`. The cache fallback will pick it up the next time remote is unreachable.
+If a step returns **HTTP 404** the mirror loop stops immediately — all mirrors serve the same content, so a 404 means the upstream bot has not yet published a TOML for this Steam build. The code then falls through to the local cache and finally to the built-in table; if all four miss, a one-shot popup appears with the unmatched DLL name, its SHA-256, the expected cache path, and the upstream URL. Only the hooks tied to that DLL are disabled — the rest of OpenSteamTool keeps working.
 
+You can also drop a TOML into the cache directory manually if you know the layout for a given build; the file name must be `<sha256>.toml`.
+
+#### Shipping a table with a release
+
+Tables under `metadata/<channel>/<component>/<sha256>.toml` are compiled into the DLL automatically — drop a file in, rebuild, and it becomes tier 4. Nothing else to wire up.
+
+The build scans the sources for every identifier the hook code asks `PatternLoader` for and compares that against the tables, so a release cannot silently ship a table that does not cover the code:
+
+* An entry whose `name` matches no identifier in the code is **dead** — the runtime looks entries up by `FNV-1a(name)`, so a renamed function leaves the entry unreachable and the hook permanently off. Dead entries are listed at build time (they are warnings, since the tables also carry entries for hooks that are currently disabled).
+* An identifier that no shipped table provides is reported as a gap. Configure with `-DOPENSTEAMTOOL_STRICT_METADATA=ON` to make gaps fatal; CI and the release workflow build with it on.
+
+Tables are community-verified reverse engineering of Steam's binaries, not something the project can derive automatically. A table that resolves the wrong address can misbehave inside Steam, so check entries against your own `steamclient64.dll` / `steamui.dll` before relying on them.
 > A short outbound HTTPS request is performed at every launch (one per DLL: `steamclient64.dll`, `steamui.dll`). The downloaded bodies are tiny (~10 KB each) and the work runs on a worker thread, so it never blocks Steam's loader.
 
 #### Using a different mirror
@@ -255,7 +268,7 @@ The log level is controlled by `[log] level` in `opensteamtool.toml`.
 - Visual Studio 2022 with MSVC (x64 toolchain)
 
 ### Runtime requirements
-- Outbound HTTPS access to `raw.githubusercontent.com` on first launch after a Steam update (see [Steam version compatibility](#steam-version-compatibility)). Cached afterwards.
+- Outbound HTTPS access is only needed to pick up tables published *after* this build was made. The tables for the Steam build this release targets are compiled in (see [Steam version compatibility](#steam-version-compatibility)), so a fresh install works offline.
 
 ### Quick build
 ```powershell

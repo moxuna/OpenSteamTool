@@ -26,7 +26,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
-        run: cmake -S src -B build -G "Ninja Multi-Config"
+        run: cmake -S src -B build -G "Ninja Multi-Config" -DOPENSTEAMTOOL_STRICT_METADATA=ON
 
       - name: Build ${{ matrix.config }}
         run: cmake --build build --config ${{ matrix.config }}

@@ -1,4 +1,5 @@
 #include "RemoteToml.h"
+#include "BuiltinMetadata.h"
 #include "OSTPlatform/include/Http.h"
 #include "Utils/Config/Config.h"
 #include "Utils/Logging/Log.h"
@@ -66,6 +67,63 @@ namespace {
         }
 
         return { remoteUrlTemplate };
+    }
+    // ── fallback tiers ─────────────────────────────────────────────────
+    // Both helpers return true when they filled `out` with a usable body.
+
+    // Tier 2: the exact-match entry in <Steam>/opensteamtool/<channel>/...
+    static bool TryCache(const std::filesystem::path& cachePath,
+                         const std::string& cachePathText,
+                         const Request& request,
+                         const std::string& lastUrl,
+                         long lastStatus,
+                         Result& out)
+    {
+        namespace fs = std::filesystem;
+        if (!fs::exists(cachePath)) return false;
+
+        std::ifstream ifs(cachePath, std::ios::binary);
+        if (!ifs) {
+            LOG_WARN("RemoteToml({}/{}): could not open cache file: {}",
+                     request.channel, request.component, cachePathText);
+            return false;
+        }
+
+        std::string buf((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+        if (buf.empty()) {
+            LOG_WARN("RemoteToml({}/{}): cache file empty: {}",
+                     request.channel, request.component, cachePathText);
+            return false;
+        }
+
+        LOG_WARN("RemoteToml({}/{}): remote failed (last URL {} HTTP {}); "
+                 "falling back to local cache {}",
+                 request.channel, request.component,
+                 lastUrl.empty() ? "<none>" : lastUrl, lastStatus, cachePathText);
+
+        out.body      = std::move(buf);
+        out.ok        = true;
+        out.fromCache = true;
+        return true;
+    }
+
+    // Tier 3: the table baked into this DLL.  Only matches the exact Steam DLL
+    // sha256 the table was generated from, so it goes inert by itself once
+    // Steam ships a new client and the user updates OpenSteamTool.
+    static bool TryBuiltin(const Request& request, Result& out)
+    {
+        const BuiltinMetadata::Table* t =
+            BuiltinMetadata::Find(request.channel, request.component, out.sha256);
+        if (!t) return false;
+
+        LOG_INFO("RemoteToml({}/{}): using built-in table for {} ({} sections)",
+                 request.channel, request.component, out.sha256, t->sections);
+
+        out.body       = std::string(t->body);
+        out.ok         = true;
+        out.fromBuiltin = true;
+        return true;
     }
 } // namespace
 
@@ -146,35 +204,53 @@ Result Fetch(const Request& request)
     }
 
     // 5. Remote failed → fall back to whatever is cached for this exact SHA.
-    if (fs::exists(cachePath)) {
-        LOG_WARN("RemoteToml({}/{}): remote failed (last URL {} HTTP {}); "
-                 "falling back to local cache {}",
-                 request.channel, request.component,
-                 lastUrl.empty() ? "<none>" : lastUrl, http.status, cachePathText);
-
-        std::ifstream ifs(cachePath, std::ios::binary);
-        if (ifs) {
-            std::string buf((std::istreambuf_iterator<char>(ifs)),
-                             std::istreambuf_iterator<char>());
-            if (!buf.empty()) {
-                out.body = std::move(buf);
-                out.ok = true;
-                out.fromCache = true;
-                return out;
-            }
-            LOG_WARN("RemoteToml({}/{}): cache file empty: {}",
-                     request.channel, request.component, cachePathText);
-        } else {
-            LOG_WARN("RemoteToml({}/{}): could not open cache file: {}",
-                     request.channel, request.component, cachePathText);
-        }
+    if (TryCache(cachePath, cachePathText, request, lastUrl, http.status, out)) {
+        return out;
     }
 
-    // 6. Total failure — caller handles popup / degraded mode.
-    LOG_WARN("RemoteToml({}/{}): no source available (last URL: {} HTTP {})",
+    // 6. Still nothing → the table compiled into this DLL, if the build shipped
+    //    one for this exact Steam DLL.  This is what makes a plain release zip
+    //    work with no network and no cache: the metadata travels with the DLL.
+    if (TryBuiltin(request, out)) {
+        return out;
+    }
+
+    // 7. Total failure — caller handles popup / degraded mode.
+    LOG_WARN("RemoteToml({}/{}): no source available (last URL: {} HTTP {}; "
+             "no local cache, no built-in table for {})",
              request.channel, request.component,
-             lastUrl.empty() ? "<none>" : lastUrl, http.status);
+             lastUrl.empty() ? "<none>" : lastUrl, http.status, out.sha256);
     return out;
+}
+Result FetchLocalOnly(const Request& request)
+{
+    namespace fs = std::filesystem;
+    Result out;
+
+    out.sha256 = SteamDiagnostics::Sha256Of(request.dllPath);
+    if (out.sha256.empty()) {
+        LOG_WARN("RemoteToml({}/{}): Sha256OfFile failed for {}",
+                 request.channel, request.component, request.dllPath);
+        return out;
+    }
+
+    const fs::path steamRoot = fs::path(request.dllPath).parent_path();
+    const fs::path cachePath = steamRoot / "opensteamtool" / request.channel
+                             / request.component / (out.sha256 + ".toml");
+
+    if (TryCache(cachePath, cachePath.string(), request, {}, 0, out))
+        return out;
+
+    TryBuiltin(request, out);
+    return out;
+}
+
+const char* SourceName(const Result& result)
+{
+    if (!result.ok)         return "none";
+    if (result.fromBuiltin) return "builtin";
+    if (result.fromCache)   return "cache";
+    return "remote";
 }
 
 } // namespace RemoteToml

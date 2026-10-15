@@ -20,7 +20,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
-        run: cmake -S src -B build -G "Ninja Multi-Config" -DOPENSTEAMTOOL_VERSION="${{ github.event.inputs.version }}"
+        run: cmake -S src -B build -G "Ninja Multi-Config" -DOPENSTEAMTOOL_VERSION="${{ github.event.inputs.version }}" -DOPENSTEAMTOOL_STRICT_METADATA=ON
 
       - name: Build Release
         run: cmake --build build --config Release
