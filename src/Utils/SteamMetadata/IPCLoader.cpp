@@ -143,11 +143,14 @@ namespace {
             "OpenSteamTool: IPC spec file not found.\n\n"
             "IPC interception is disabled for this session; pattern-based "
             "hooks are unaffected.\n\n"
+            "This build has no table compiled in for this Steam version, so update\n"
+            "OpenSteamTool to a release made for it.\n\n"
             "You can:\n"
-            "  1. Wait for the next upstream publish and restart Steam.\n"
-            "  2. Drop a matching TOML at:\n"
+            "  1. Install a newer OpenSteamTool release, then restart Steam.\n"
+            "  2. Wait for the next upstream publish and restart Steam.\n"
+            "  3. Drop a matching TOML at:\n"
             "       <Steam>\\opensteamtool\\ipc\\steamclient\\" + sha256 + ".toml\n"
-            "  3. Check upstream:\n"
+            "  4. Check upstream:\n"
             "       https://github.com/OpenSteam001/steam-monitor/tree/ipc/steamclient");
     }
 
@@ -166,6 +169,12 @@ bool Load(const std::string& steamclientPath)
     });
 
     if (!r.ok) {
+        // Without this the only evidence of the failure was the popup: main.log
+        // showed nothing at all, which made the "IPC spec missing" reports
+        // impossible to correlate with a Steam build.
+        LOG_WARN("IPCLoader: no IPC table for steamclient64.dll (sha256 {}); "
+                 "IPC interception disabled for this session",
+                 r.sha256.empty() ? "(hash failed)" : r.sha256);
         ShowMissingPopup(r.sha256.empty() ? "(hash failed)" : r.sha256);
         return false;
     }
@@ -189,7 +198,17 @@ bool Load(const std::string& steamclientPath)
 
     LOG_INFO("IPCLoader: loaded {} methods across {} interfaces ({})",
              MethodCount(), InterfaceCount(),
-             r.fromCache ? "cache fallback" : "remote");
+             RemoteToml::SourceName(r));
+
+    // A table that parses but registers nothing means the interface names no
+    // longer match EIPCInterface (the loader rejects them one by one), which is
+    // otherwise indistinguishable from success in the log.
+    if (MethodCount() == 0) {
+        LOG_WARN("IPCLoader: table for {} parsed but registered no methods; "
+                 "IPC interception will do nothing",
+                 r.sha256);
+    }
+
     return true;
 }
 

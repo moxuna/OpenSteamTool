@@ -52,6 +52,29 @@ include(Spdlog)
 include(Protobuf)
 include(Tomlplusplus)
 include(LogMacros)
+include(BuiltinMetadata)
+
+# ---------------------------------------------------------------------------
+# Built-in Steam metadata (patterns + IPC tables) compiled into the DLL.
+#
+# A release has to keep working on the Steam build it was made for even when the
+# upstream tracker has not published a table for it yet -- which is the normal
+# state right after a Steam update.  Baking the tables in gives Fetch() a third
+# tier after "remote" and "local cache", so unpacking a release into the Steam
+# directory is enough.
+#
+# Tables live in <repo>/metadata/<channel>/<component>/<sha256>.toml; add one
+# and rebuild, nothing else to wire up.
+# ---------------------------------------------------------------------------
+# CI builds with this ON: a table entry whose name matches no identifier in the
+# code is silently dead, so shipping one has to fail loudly rather than degrade
+# to "hooks just do not install".  Off by default because a contributor adding a
+# hook cannot know the RVA for a Steam build they do not have.
+option(OPENSTEAMTOOL_STRICT_METADATA
+    "Fail the build when the shipped metadata does not cover every hook identifier"
+    OFF)
+
+opensteamtool_add_builtin_metadata(BUILTIN_METADATA_HEADER)
 
 # Build the host code generators (ipc_codegen) in their own binary subtree so
 # their executables never land in the shipped output directory. EXCLUDE_FROM_ALL
@@ -126,6 +149,10 @@ add_library(OpenSteamTool SHARED
     Utils/SteamMetadata/RemoteToml.cpp
     Utils/SteamMetadata/StatsClient.cpp
     Utils/SteamMetadata/SteamDiagnostics.cpp
+
+    # Generated: Steam metadata tables baked into the DLL (see
+    # opensteamtool_add_builtin_metadata above).
+    "${BUILTIN_METADATA_HEADER}"
 
     # Pipe subsystem: generic handshake registry + ProcessInspector core, plus
     # self-contained features that own their primitives.

@@ -153,13 +153,16 @@ static void ShowDownloadFailedPopup(const std::string& dllName,
         "OpenSteamTool: signature file not found for " + dllName + ".\n\n"
         "Hooks that depend on " + dllName + " are disabled for this session; "
         "other modules are unaffected.\n\n"
+        "This build has no table compiled in for this Steam version, so update\n"
+        "OpenSteamTool to a release made for it.\n\n"
         "You can:\n"
-        "  1. Wait for the next signature update, then restart Steam.\n"
-        "  2. Drop a matching TOML at:\n"
+        "  1. Install a newer OpenSteamTool release, then restart Steam.\n"
+        "  2. Wait for the next signature update, then restart Steam.\n"
+        "  3. Drop a matching TOML at:\n"
         "       <Steam>\\opensteamtool\\pattern\\" + component + "\\" + sha256 + ".toml\n"
-        "  3. Check upstream:\n"
+        "  4. Check upstream:\n"
         "       https://github.com/OpenSteam001/steam-monitor/tree/pattern/" + component + "\n"
-        "  4. Report the diagnostics below:\n"
+        "  5. Report the diagnostics below:\n"
         "       https://github.com/OpenSteam001/OpenSteamTool/issues");
 }
 
@@ -187,7 +190,7 @@ bool Load(OSTPlatform::DynamicLibrary::ModuleHandle module, const std::string& d
         PatternMap map = ParsePatternString(r.body, &parseErr);
         if (!map.empty()) {
             LOG_INFO("PatternLoader: loaded {} patterns for {} ({})",
-                     map.size(), component, r.fromCache ? "cache fallback" : "remote");
+                     map.size(), component, RemoteToml::SourceName(r));
             g_moduleMaps[module] = std::move(map);
             return true;
         }
